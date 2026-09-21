@@ -1,0 +1,42 @@
+.card {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  /* Dentro de um flex column com altura fixa (ex.: a barra lateral do
+     veículo), overflow != visible faz o card virar "encolhível" para o
+     algoritmo de flexbox (seu min-height automático passa a ser 0 em vez do
+     tamanho do conteúdo). Sem isto, quando os cards juntos passam da altura
+     disponível, o navegador os espreme até caberem — cortando botões e texto
+     — em vez de deixar a rolagem do contêiner pai assumir o excesso. */
+  flex-shrink: 0;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.subtitle {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.body {
+  padding: var(--space-4);
+}
+
+.flush {
+  padding: 0;
+}

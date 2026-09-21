@@ -1,0 +1,243 @@
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/farbo/tracker-platform/backend/internal/config"
+	"github.com/farbo/tracker-platform/backend/internal/database"
+)
+
+var (
+	ErrInvalidCredentials = errors.New("e-mail ou senha inválidos")
+	ErrInvalidToken       = errors.New("token inválido ou expirado")
+	ErrInactiveUser       = errors.New("usuário desativado")
+)
+
+const issuer = "tracker-platform"
+
+// dummyHash é um bcrypt válido de uma senha que ninguém tem. Existe só para
+// igualar o tempo de resposta do login quando o e-mail não existe.
+const dummyHash = "$2a$12$TfwVGhu.uQbVoziiu/9kLu85osKWoyO8pkR1ho7GQ.nHGiwQ67idW"
+
+type Claims struct {
+	Role  string `json:"role"`
+	Email string `json:"email"`
+	jwt.RegisteredClaims
+}
+
+// Tokens é o par devolvido no login e no refresh.
+type Tokens struct {
+	AccessToken  string    `json:"accessToken"`
+	RefreshToken string    `json:"refreshToken"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+	User         *User     `json:"user"`
+}
+
+type Service struct {
+	repo *Repository
+	cfg  config.Auth
+	log  *slog.Logger
+}
+
+func NewService(repo *Repository, cfg config.Auth, log *slog.Logger) *Service {
+	if cfg.BcryptCost < bcrypt.MinCost || cfg.BcryptCost > bcrypt.MaxCost {
+		cfg.BcryptCost = bcrypt.DefaultCost
+	}
+	return &Service{repo: repo, cfg: cfg, log: log.With("component", "auth")}
+}
+
+func (s *Service) HashPassword(plain string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(plain), s.cfg.BcryptCost)
+	return string(hash), err
+}
+
+// Login autentica e emite o par de tokens.
+func (s *Service) Login(ctx context.Context, email, password, userAgent string) (*Tokens, error) {
+	user, err := s.repo.GetByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, database.ErrNotFound) {
+			// Compara contra um hash descartável para que a resposta demore o
+			// mesmo com e sem usuário: sem isso dá para descobrir e-mails
+			// cadastrados apenas medindo o tempo de resposta.
+			_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password))
+			return nil, ErrInvalidCredentials
+		}
+		return nil, err
+	}
+	if !user.Active {
+		return nil, ErrInactiveUser
+	}
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		return nil, ErrInvalidCredentials
+	}
+	return s.issue(ctx, user, userAgent)
+}
+
+// Refresh troca um refresh token válido por um novo par (rotação de token).
+func (s *Service) Refresh(ctx context.Context, refreshToken, userAgent string) (*Tokens, error) {
+	record, err := s.repo.ConsumeRefreshToken(ctx, hashToken(refreshToken))
+	if err != nil {
+		if errors.Is(err, database.ErrNotFound) {
+			return nil, ErrInvalidToken
+		}
+		return nil, err
+	}
+
+	user, err := s.repo.GetByID(ctx, record.UserID)
+	if err != nil {
+		return nil, ErrInvalidToken
+	}
+	if !user.Active {
+		return nil, ErrInactiveUser
+	}
+	return s.issue(ctx, user, userAgent)
+}
+
+func (s *Service) Logout(ctx context.Context, refreshToken string) error {
+	if strings.TrimSpace(refreshToken) == "" {
+		return nil
+	}
+	return s.repo.RevokeRefreshToken(ctx, hashToken(refreshToken))
+}
+
+func (s *Service) issue(ctx context.Context, user *User, userAgent string) (*Tokens, error) {
+	expiresAt := time.Now().Add(s.cfg.AccessTokenTTL)
+
+	claims := Claims{
+		Role:  user.Role,
+		Email: user.Email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   user.ID.String(),
+			Issuer:    issuer,
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			ID:        uuid.NewString(),
+		},
+	}
+	access, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.cfg.JWTSecret)
+	if err != nil {
+		return nil, fmt.Errorf("assinando token: %w", err)
+	}
+
+	refresh, err := newOpaqueToken()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.StoreRefreshToken(ctx, user.ID, hashToken(refresh),
+		time.Now().Add(s.cfg.RefreshTokenTTL), userAgent); err != nil {
+		return nil, err
+	}
+
+	return &Tokens{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		ExpiresAt:    expiresAt,
+		User:         user,
+	}, nil
+}
+
+// Parse valida o access token.
+func (s *Service) Parse(token string) (*Claims, error) {
+	parsed, err := jwt.ParseWithClaims(token, &Claims{}, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("algoritmo de assinatura inesperado: %v", t.Header["alg"])
+		}
+		return s.cfg.JWTSecret, nil
+	}, jwt.WithIssuer(issuer), jwt.WithValidMethods([]string{"HS256"}))
+	if err != nil || !parsed.Valid {
+		return nil, ErrInvalidToken
+	}
+	claims, ok := parsed.Claims.(*Claims)
+	if !ok {
+		return nil, ErrInvalidToken
+	}
+	return claims, nil
+}
+
+func (s *Service) GetUser(ctx context.Context, id uuid.UUID) (*User, error) {
+	return s.repo.GetByID(ctx, id)
+}
+
+func (s *Service) ListUsers(ctx context.Context) ([]*User, error) { return s.repo.List(ctx) }
+
+// CreateUser cadastra um usuário já com a senha cifrada.
+func (s *Service) CreateUser(ctx context.Context, email, name, role, password string) (*User, error) {
+	email = strings.TrimSpace(strings.ToLower(email))
+	if !strings.Contains(email, "@") {
+		return nil, fmt.Errorf("e-mail inválido")
+	}
+	if !ValidRole(role) {
+		return nil, fmt.Errorf("perfil inválido: %q", role)
+	}
+	if len(password) < 10 {
+		return nil, fmt.Errorf("a senha precisa ter ao menos 10 caracteres")
+	}
+
+	hash, err := s.HashPassword(password)
+	if err != nil {
+		return nil, err
+	}
+	user := &User{Email: email, Name: name, Role: role, PasswordHash: hash, Active: true}
+	if err := s.repo.Create(ctx, user); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// EnsureBootstrapUser cria o primeiro administrador quando o banco está vazio.
+func (s *Service) EnsureBootstrapUser(ctx context.Context, cfg config.Bootstrap) error {
+	count, err := s.repo.Count(ctx)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	if cfg.AdminEmail == "" || cfg.AdminPassword == "" {
+		s.log.Warn("nenhum usuário cadastrado e ADMIN_EMAIL/ADMIN_PASSWORD não definidos; " +
+			"defina as variáveis para criar o primeiro acesso")
+		return nil
+	}
+
+	user, err := s.CreateUser(ctx, cfg.AdminEmail, cfg.AdminName, RoleAdmin, cfg.AdminPassword)
+	if err != nil {
+		return fmt.Errorf("criando usuário inicial: %w", err)
+	}
+	s.log.Info("usuário administrador inicial criado", "email", user.Email)
+	return nil
+}
+
+// CleanupExpiredTokens roda periodicamente.
+func (s *Service) CleanupExpiredTokens(ctx context.Context) {
+	if removed, err := s.repo.DeleteExpiredRefreshTokens(ctx); err != nil {
+		s.log.Warn("falha ao limpar refresh tokens", "err", err)
+	} else if removed > 0 {
+		s.log.Info("refresh tokens antigos removidos", "count", removed)
+	}
+}
+
+func newOpaqueToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("gerando refresh token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}

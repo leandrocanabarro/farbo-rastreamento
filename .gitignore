@@ -1,0 +1,20 @@
+# Ambiente
+.env
+.env.local
+*.local
+
+# Node
+node_modules/
+frontend/dist/
+
+# Go
+backend/bin/
+*.test
+coverage.out
+
+# Editores
+.vscode/
+.idea/
+*.swp
+.DS_Store
+frontend/tsconfig.tsbuildinfo

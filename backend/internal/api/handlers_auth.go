@@ -1,0 +1,161 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/farbo/tracker-platform/backend/internal/audit"
+	"github.com/farbo/tracker-platform/backend/internal/auth"
+	"github.com/farbo/tracker-platform/backend/internal/database"
+)
+
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"time":   time.Now().UTC(),
+	})
+}
+
+// handleReady só responde 200 quando as dependências realmente atendem.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	if err := s.DB.Ping(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":   "degraded",
+			"database": err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":            "ready",
+		"database":          "ok",
+		"trackerSessions":   s.Conns.Count(),
+		"websocketClients":  s.Hub.Count(),
+		"registeredDrivers": len(s.Registry.All()),
+	})
+}
+
+type loginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "corpo inválido")
+		return
+	}
+
+	tokens, err := s.Auth.Login(r.Context(), req.Email, req.Password, r.UserAgent())
+	if err != nil {
+		if errors.Is(err, auth.ErrInvalidCredentials) || errors.Is(err, auth.ErrInactiveUser) {
+			s.Audit.Record(r.Context(), &audit.Entry{
+				Action: audit.ActionLoginFailed, Result: "DENIED", IPAddress: clientIP(r),
+				Metadata: map[string]any{"email": req.Email},
+			})
+			// Mensagem única para não revelar se o e-mail existe.
+			writeError(w, http.StatusUnauthorized, "e-mail ou senha inválidos")
+			return
+		}
+		handleStoreError(w, err, "usuário não encontrado")
+		return
+	}
+
+	s.Audit.Record(r.Context(), &audit.Entry{
+		UserID: &tokens.User.ID, Action: audit.ActionLogin,
+		Result: "OK", IPAddress: clientIP(r),
+	})
+	writeJSON(w, http.StatusOK, tokens)
+}
+
+type refreshRequest struct {
+	RefreshToken string `json:"refreshToken"`
+}
+
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	var req refreshRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "corpo inválido")
+		return
+	}
+
+	tokens, err := s.Auth.Refresh(r.Context(), req.RefreshToken, r.UserAgent())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "sessão expirada; faça login novamente")
+		return
+	}
+	writeJSON(w, http.StatusOK, tokens)
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	var req refreshRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "corpo inválido")
+		return
+	}
+	if err := s.Auth.Logout(r.Context(), req.RefreshToken); err != nil {
+		handleStoreError(w, err, "token não encontrado")
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.FromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "autenticação obrigatória")
+		return
+	}
+	user, err := s.Auth.GetUser(r.Context(), principal.UserID)
+	if err != nil {
+		handleStoreError(w, err, "usuário não encontrado")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := s.Auth.ListUsers(r.Context())
+	if err != nil {
+		handleStoreError(w, err, "usuários não encontrados")
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+type createUserRequest struct {
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+	Password string `json:"password"`
+}
+
+func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	var req createUserRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "corpo inválido")
+		return
+	}
+
+	user, err := s.Auth.CreateUser(r.Context(), req.Email, req.Name, req.Role, req.Password)
+	if err != nil {
+		if errors.Is(err, database.ErrConflict) {
+			writeError(w, http.StatusConflict, "já existe um usuário com esse e-mail")
+			return
+		}
+		// O que sobra são erros de validação, que o cliente consegue corrigir.
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, user)
+}
+
+func (s *Server) handleListProtocols(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.Registry.Descriptors())
+}

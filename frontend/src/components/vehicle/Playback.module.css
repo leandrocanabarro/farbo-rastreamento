@@ -1,0 +1,74 @@
+.playback {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-raised);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.playButton {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-full);
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.playButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.slider {
+  flex: 1;
+  min-width: 160px;
+  accent-color: var(--accent);
+}
+
+.speeds {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.speedButton {
+  padding: 2px var(--space-2);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.speedActive {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.readout {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.readoutValue {
+  color: var(--text-primary);
+  font-weight: 500;
+}

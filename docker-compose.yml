@@ -1,0 +1,136 @@
+name: tracker-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tracker}
+      POSTGRES_USER: ${POSTGRES_USER:-tracker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-tracker} -d ${POSTGRES_DB:-tracker}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+
+      HTTP_PORT: 8080
+      # Porta em que os rastreadores conectam. Precisa estar aberta na internet.
+      TCP_PORT: 5000
+
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-tracker}
+      POSTGRES_USER: ${POSTGRES_USER:-tracker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+      REDIS_ENABLED: ${REDIS_ENABLED:-true}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+      JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET no .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+
+      # Primeiro acesso: criado apenas se não houver nenhum usuário.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_NAME: ${ADMIN_NAME:-Administrador}
+
+      # Regra de segurança do corte de motor (§14).
+      ENGINE_CUT_MAX_SPEED_KMH: ${ENGINE_CUT_MAX_SPEED_KMH:-5}
+      ENGINE_CUT_MAX_POSITION_AGE: ${ENGINE_CUT_MAX_POSITION_AGE:-10m}
+      COMMAND_ACK_TIMEOUT: ${COMMAND_ACK_TIMEOUT:-15s}
+
+      DEVICE_STALE_AFTER: ${DEVICE_STALE_AFTER:-2m}
+      DEVICE_OFFLINE_AFTER: ${DEVICE_OFFLINE_AFTER:-5m}
+
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+      LOG_MASK_IMEI: ${LOG_MASK_IMEI:-true}
+
+      # Vazio desliga o tracing; aponte para um coletor OTLP para ligá-lo.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: tracker-platform
+
+      # Responder também aos pacotes de posição do GT06. Alguns firmwares
+      # reenviam a posição sem ACK; ligue apenas se observar isso.
+      GT06_ACK_GPS: ${GT06_ACK_GPS:-false}
+      # Tamanho do quadro binário H02 (0 = heurística de um quadro por leitura).
+      H02_BINARY_FRAME_LENGTH: ${H02_BINARY_FRAME_LENGTH:-0}
+      # Captura de tráfego não identificado pelo adaptador TKSTAR V4 (§38).
+      TKSTAR_V4_CAPTURE: ${TKSTAR_V4_CAPTURE:-false}
+    ports:
+      - '${HTTP_PORT:-8080}:8080'
+      - '${TCP_PORT:-5000}:5000'
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - '${FRONTEND_PORT:-3000}:80'
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - '${PROMETHEUS_PORT:-9090}:9090'
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - '${GRAFANA_PORT:-3001}:3000'
+
+volumes:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
