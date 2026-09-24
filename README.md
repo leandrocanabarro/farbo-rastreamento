@@ -462,3 +462,6 @@ mais importam:
 - [`docs/PROTOCOLS.md`](docs/PROTOCOLS.md) — o que está confirmado e como
   implementar uma variante nova
 - [`docs/TKSTAR.md`](docs/TKSTAR.md) — configuração do aparelho, passo a passo
+- [`docs/J16.md`](docs/J16.md) — configuração completa do rastreador J16 (GT06
+  desbloqueado): comandos SMS, senha padrão, fiação e integração com os
+  `commandOverrides` deste projeto
